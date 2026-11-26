@@ -1,6 +1,6 @@
 // Offline-Cache für den Reiseplan China (GitHub Pages).
 // Cache zuerst: startet sofort, auch ohne Netz. Mit Netz wird im Hintergrund aktualisiert.
-const C = "reiseplan-china-202611251200";
+const C = "reiseplan-china-202611261300";
 const FILES = ["./", "./index.html", "./sw.js", "./manifest.json", "./apple-touch-icon.png", "./icon-192.png", "./icon-512.png"];
 self.addEventListener("install", e => {
   self.skipWaiting();
