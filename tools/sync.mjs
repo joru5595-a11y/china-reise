@@ -1,5 +1,6 @@
 // Übernimmt den Klartext-Reiseplan (Artifact index.html) verschlüsselt in die Offline-App.
-// Aufruf: CN_PW=... node tools/sync.mjs <klartext.html> [--check]
+// Aufruf: CN_PW=... node tools/sync.mjs <klartext.html> [--check]   (--check prüft nur, ohne Passwort)
+// Vor dem Verschlüsseln: Syntax aller Skripte und Datenprüfung mit tools/daten.mjs pruefen (Verweise, Formate).
 // Gleiches Salt und gleiche Iterationen wie bisher (gespeicherte Schlüssel auf den Handys bleiben gültig),
 // neuer zufälliger IV. Prüft Syntax und Roundtrip, schreibt index.html, sw.js und tools/last-sync.sha256.
 import { readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
@@ -13,7 +14,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = process.argv[2];
 const checkOnly = process.argv.includes("--check");
 const pw = process.env.CN_PW;
-if (!src || !pw) { console.error("FEHLER: Aufruf CN_PW=... node tools/sync.mjs <klartext.html>"); process.exit(2); }
+if (!src || (!pw && !checkOnly)) { console.error("FEHLER: Aufruf CN_PW=... node tools/sync.mjs <klartext.html>"); process.exit(2); }
 
 const plain = readFileSync(src, "utf8");
 if (!/<html/i.test(plain) || !plain.includes("const DAYS") || plain.length < 100000) {
@@ -31,11 +32,20 @@ scripts.forEach((s, k) => {
   try { execFileSync(process.execPath, ["--check", f], { stdio: "pipe" }); }
   catch (e) { console.error(`FEHLER: Syntaxfehler in Skript ${k}:\n` + e.stderr.toString().slice(0, 1500)); process.exit(4); }
 });
-if (checkOnly) { console.log(`OK Syntax (${scripts.length} Skripte), Aenderung vorhanden`); process.exit(0); }
+// Datenprüfung (kaputte Verweise, Städte, Uhrzeiten) mit daten.mjs, fail-closed
+const daten = join(ROOT, "tools", "daten.mjs");
+if (!existsSync(daten)) { console.error("FEHLER: tools/daten.mjs fehlt, Datenprüfung nicht möglich"); process.exit(7); }
+try { execFileSync(process.execPath, [daten, src, "pruefen"], { stdio: "pipe" }); }
+catch (e) { console.error("FEHLER: Datenprüfung fehlgeschlagen:\n" + (e.stdout || "").toString().slice(0, 1500)); process.exit(7); }
+if (checkOnly) { console.log(`OK Syntax (${scripts.length} Skripte) und Daten geprüft, Aenderung vorhanden`); process.exit(0); }
 
 const page = readFileSync(join(ROOT, "index.html"), "utf8");
-const s = page.match(/\bs:\s*"([^"]+)"/)[1];
-const n = Number(page.match(/\bn:\s*(\d+)/)[1]);
+// Nur innerhalb des Blocks „const ENC = { s, i, n, d }“ suchen und ersetzen
+const encM = page.match(/const ENC\s*=\s*\{[^}]*\}/);
+if (!encM) { console.error("FEHLER: Block const ENC in der Offline-App nicht gefunden"); process.exit(8); }
+const enc = encM[0], feld = k => { const m = enc.match(new RegExp(`\\b${k}:\\s*"?([^",\\s}]+)"?`)); if (!m) { console.error(`FEHLER: Feld ${k} in ENC fehlt`); process.exit(8); } return m[1]; };
+const s = feld("s");
+const n = Number(feld("n"));
 const b64 = b => Buffer.from(b).toString("base64");
 const ub64 = t => new Uint8Array(Buffer.from(t, "base64"));
 const base = await wc.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveBits"]);
@@ -44,13 +54,15 @@ const key = await wc.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["
 
 // Altes Passwort muss zum bisherigen Inhalt passen
 try {
-  await wc.subtle.decrypt({ name: "AES-GCM", iv: ub64(page.match(/\bi:\s*"([^"]+)"/)[1]) }, key, ub64(page.match(/\bd:\s*"([^"]+)"/)[1]));
+  await wc.subtle.decrypt({ name: "AES-GCM", iv: ub64(feld("i")) }, key, ub64(feld("d")));
 } catch { console.error("FEHLER: Passwort passt nicht zur bisherigen Offline-App"); process.exit(5); }
 
 const iv = wc.getRandomValues(new Uint8Array(12));
 const ct = await wc.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plain));
-const out = page.replace(/(\bi:\s*")[^"]+(")/, `$1${b64(iv)}$2`).replace(/(\bd:\s*")[^"]+(")/, `$1${b64(ct)}$2`);
-const back = new TextDecoder().decode(await wc.subtle.decrypt({ name: "AES-GCM", iv: ub64(out.match(/\bi:\s*"([^"]+)"/)[1]) }, key, ub64(out.match(/\bd:\s*"([^"]+)"/)[1])));
+const encNeu = enc.replace(/(\bi:\s*")[^"]+(")/, `$1${b64(iv)}$2`).replace(/(\bd:\s*")[^"]+(")/, `$1${b64(ct)}$2`);
+const out = page.replace(enc, () => encNeu);
+const encB = out.match(/const ENC\s*=\s*\{[^}]*\}/)[0], fB = k => encB.match(new RegExp(`\\b${k}:\\s*"([^"]+)"`))[1];
+const back = new TextDecoder().decode(await wc.subtle.decrypt({ name: "AES-GCM", iv: ub64(fB("i")) }, key, ub64(fB("d"))));
 if (back !== plain) { console.error("FEHLER: Roundtrip stimmt nicht"); process.exit(6); }
 
 const p = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
